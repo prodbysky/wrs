@@ -39,6 +39,10 @@ impl winit::application::ApplicationHandler for App {
         event: winit::event::WindowEvent,
     ) {
         let renderer = self.renderer.as_mut().unwrap();
+        renderer.begin_frame();
+        renderer.draw_quad(0.0, 0.0, 100.0, 100.0, [1.0, 1.0, 1.0]);
+        renderer.end_frame();
+
         match event {
             winit::event::WindowEvent::CloseRequested => {
                 event_loop.exit();
@@ -85,24 +89,6 @@ impl Vertex {
     }
 }
 
-const VERTICES: &[Vertex] = &[
-    Vertex {
-        pos: [100.0, 100.0, 0.0],
-        color: [1.0, 0.0, 0.0],
-    }, // top left
-    Vertex {
-        pos: [300.0, 100.0, 0.0],
-        color: [1.0, 0.0, 0.0],
-    }, // top right
-    Vertex {
-        pos: [300.0, 300.0, 0.0],
-        color: [1.0, 0.0, 0.0],
-    }, // bottom right
-    Vertex {
-        pos: [100.0, 300.0, 0.0],
-        color: [1.0, 0.0, 0.0],
-    }, // bottom left
-];
 
 struct Camera {
     w: f32,
@@ -140,8 +126,6 @@ impl CameraUniform {
     }
 }
 
-const INDICES: &[u16] = &[0, 1, 2, 0, 2, 3];
-
 struct Renderer {
     window: Arc<winit::window::Window>,
     device: wgpu::Device,
@@ -150,12 +134,17 @@ struct Renderer {
     surface: wgpu::Surface<'static>,
     surface_fmt: wgpu::TextureFormat,
     render_pipeline: wgpu::RenderPipeline,
+
     vbo: wgpu::Buffer,
     ibo: wgpu::Buffer,
+
     camera: Camera,
     camera_uniform: CameraUniform,
     camera_buffer: wgpu::Buffer,
-    camera_bind_group: wgpu::BindGroup
+    camera_bind_group: wgpu::BindGroup,
+
+    draw_vertices: Vec<Vertex>,
+    draw_indices: Vec<u16>,
 }
 
 impl Renderer {
@@ -211,15 +200,12 @@ impl Renderer {
 
         let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             layout: &camera_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: camera_buffer.as_entire_binding(),
-                }
-            ],
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: camera_buffer.as_entire_binding(),
+            }],
             label: None,
         });
-
 
         let render_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -227,18 +213,6 @@ impl Renderer {
                 bind_group_layouts: &[&camera_bind_group_layout],
                 push_constant_ranges: &[],
             });
-
-        let vbo = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: None,
-            contents: bytemuck::cast_slice(VERTICES),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-
-        let ibo = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: None,
-            contents: bytemuck::cast_slice(INDICES),
-            usage: wgpu::BufferUsages::INDEX,
-        });
 
         let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: None,
@@ -280,23 +254,106 @@ impl Renderer {
 
         let renderer = Self {
             window,
+            vbo: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: None,
+                contents: &[],
+                usage: wgpu::BufferUsages::VERTEX,
+            }),
+            ibo: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: None,
+                contents: &[],
+                usage: wgpu::BufferUsages::INDEX,
+            }),
             device,
             queue,
             size,
             surface,
             surface_fmt,
             render_pipeline,
-            vbo,
-            ibo,
             camera,
             camera_uniform,
             camera_buffer,
-            camera_bind_group
+            camera_bind_group,
+            draw_indices: vec![],
+            draw_vertices: vec![],
         };
 
         renderer.configure_surface();
 
         renderer
+    }
+
+    pub fn begin_frame(&mut self) {
+        self.draw_vertices.clear();
+        self.draw_indices.clear();
+    }
+
+    pub fn draw_quad(&mut self, x: f32, y: f32, w: f32, h: f32, color: [f32; 3]) {
+        let start = self.draw_vertices.len() as u16;
+
+        self.draw_vertices.extend_from_slice(&[
+            Vertex {
+                pos: [x, y, 0.0],
+                color,
+            },
+            Vertex {
+                pos: [x + w, y, 0.0],
+                color,
+            },
+            Vertex {
+                pos: [x + w, y + h, 0.0],
+                color,
+            },
+            Vertex {
+                pos: [x, y + h, 0.0],
+                color,
+            },
+        ]);
+
+        self.draw_indices.extend_from_slice(&[
+            start,
+            start + 1,
+            start + 2,
+            start,
+            start + 2,
+            start + 3,
+        ]);
+    }
+
+    pub fn end_frame(&mut self) {
+        if self.draw_vertices.is_empty() {
+            return;
+        }
+
+        if (self.vbo.size() as usize) < self.draw_vertices.len() * std::mem::size_of::<Vertex>() {
+            self.vbo.destroy();
+            let vbo = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: None,
+                    contents: bytemuck::cast_slice(&self.draw_vertices),
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                });
+            self.vbo = vbo;
+        } else {
+            self.queue.write_buffer(&self.vbo, 0, bytemuck::cast_slice(&self.draw_vertices));
+        }
+
+        if (self.ibo.size() as usize) < self.draw_indices.len() * std::mem::size_of::<u16>() {
+            self.ibo.destroy();
+            let ibo = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: None,
+                    contents: bytemuck::cast_slice(&self.draw_indices),
+                    usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+                });
+            self.ibo = ibo;
+        } else {
+            self.queue.write_buffer(&self.ibo, 0, bytemuck::cast_slice(&self.draw_indices));
+
+        }
+
     }
 
     pub fn render(&mut self) {
@@ -317,12 +374,7 @@ impl Renderer {
                 depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color {
-                        r: 5 as f64 / 255.0,
-                        g: 5 as f64 / 255.0,
-                        b: 5 as f64 / 255.0,
-                        a: 1.0,
-                    }),
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
                     store: wgpu::StoreOp::Store,
                 },
             })],
@@ -335,7 +387,7 @@ impl Renderer {
         renderpass.set_bind_group(0, &self.camera_bind_group, &[]);
         renderpass.set_vertex_buffer(0, self.vbo.slice(..));
         renderpass.set_index_buffer(self.ibo.slice(..), wgpu::IndexFormat::Uint16);
-        renderpass.draw_indexed(0..6, 0, 0..1);
+        renderpass.draw_indexed(0..self.draw_indices.len() as u32, 0, 0..1);
 
         drop(renderpass);
 
@@ -349,7 +401,11 @@ impl Renderer {
         self.camera.w = new_size.width as f32;
         self.camera.h = new_size.height as f32;
         self.camera_uniform.update(&self.camera);
-        self.queue.write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[self.camera_uniform]));
+        self.queue.write_buffer(
+            &self.camera_buffer,
+            0,
+            bytemuck::cast_slice(&[self.camera_uniform]),
+        );
         self.configure_surface();
     }
 
@@ -366,7 +422,7 @@ impl Renderer {
             width: self.size.width,
             height: self.size.height,
             desired_maximum_frame_latency: 2,
-            present_mode: wgpu::PresentMode::AutoVsync,
+            present_mode: wgpu::PresentMode::Immediate,
         };
         self.surface.configure(&self.device, &surface_cfg);
     }

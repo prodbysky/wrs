@@ -84,11 +84,15 @@ impl Vertex {
 
 const VERTICES: &[Vertex] = &[
     Vertex { pos: [-0.25, -0.25, 0.0], color: [1.0, 0.0, 0.0] }, // bottom left
+    Vertex { pos: [0.25, -0.25, 0.0], color: [1.0, 0.0, 0.0] },  // bottom right
     Vertex { pos: [0.25, 0.25, 0.0], color: [1.0, 0.0, 0.0] },   // top right
     Vertex { pos: [-0.25, 0.25, 0.0], color: [1.0, 0.0, 0.0] },  // top left
-    Vertex { pos: [0.25, -0.25, 0.0], color: [1.0, 0.0, 0.0] },  // bottom right
-    Vertex { pos: [0.25, 0.25, 0.0], color: [1.0, 0.0, 0.0] },  // top right
-    Vertex { pos: [-0.25, -0.25, 0.0], color: [1.0, 0.0, 0.0] },  // bottom left
+];
+
+
+const INDICES: &[u16] = &[
+    0, 1, 2,
+    0, 2, 3
 ];
 
 struct Renderer {
@@ -99,7 +103,8 @@ struct Renderer {
     surface: wgpu::Surface<'static>,
     surface_fmt: wgpu::TextureFormat,
     render_pipeline: wgpu::RenderPipeline,
-    vbo: wgpu::Buffer
+    vbo: wgpu::Buffer,
+    ibo: wgpu::Buffer,
 }
 
 impl Renderer {
@@ -135,6 +140,12 @@ impl Renderer {
             label: None,
             contents: bytemuck::cast_slice(VERTICES),
             usage: wgpu::BufferUsages::VERTEX
+        });
+
+        let ibo = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: None,
+            contents: bytemuck::cast_slice(INDICES),
+            usage: wgpu::BufferUsages::INDEX
         });
 
         let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor { 
@@ -185,7 +196,8 @@ impl Renderer {
             surface,
             surface_fmt,
             render_pipeline,
-            vbo
+            vbo,
+            ibo
         };
 
         renderer.configure_surface();
@@ -226,7 +238,8 @@ impl Renderer {
 
         renderpass.set_pipeline(&self.render_pipeline);
         renderpass.set_vertex_buffer(0, self.vbo.slice(..));
-        renderpass.draw(0..6, 0..1);
+        renderpass.set_index_buffer(self.ibo.slice(..), wgpu::IndexFormat::Uint16);
+        renderpass.draw_indexed(0..6, 0, 0..1);
 
         drop(renderpass);
 

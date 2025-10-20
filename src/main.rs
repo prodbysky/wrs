@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use wgpu::util::DeviceExt;
+
 fn main() {
     env_logger::init();
 
@@ -10,14 +12,6 @@ fn main() {
     let mut app = App::default();
 
     event_loop.run_app(&mut app).unwrap();
-}
-
-
-#[repr(C)]
-#[derive(Copy, Clone, Debug)]
-pub struct Vertex {
-    pos: [f32; 3],
-    color: [f32; 3],
 }
 
 #[derive(Default)]
@@ -58,6 +52,44 @@ impl winit::application::ApplicationHandler for App {
     }
 }
 
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct Vertex {
+    pos: [f32; 3],
+    color: [f32; 3],
+}
+
+impl Vertex {
+    pub fn desc() -> wgpu::VertexBufferLayout<'static> {
+        wgpu::VertexBufferLayout { 
+            array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Vertex, 
+            attributes: &[
+                wgpu::VertexAttribute {
+                    offset: 0,
+                    shader_location: 0,
+                    format: wgpu::VertexFormat::Float32x3,
+                },
+                wgpu::VertexAttribute {
+                    offset: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
+                    shader_location: 1,
+                    format: wgpu::VertexFormat::Float32x3,
+                }
+            ] 
+        }
+    }
+}
+
+
+
+const VERTICES: &[Vertex] = &[
+    Vertex { pos: [-0.25, -0.25, 0.0], color: [1.0, 0.0, 0.0] }, // bottom left
+    Vertex { pos: [0.25, 0.25, 0.0], color: [1.0, 0.0, 0.0] },   // top right
+    Vertex { pos: [-0.25, 0.25, 0.0], color: [1.0, 0.0, 0.0] },  // top left
+    Vertex { pos: [0.25, -0.25, 0.0], color: [1.0, 0.0, 0.0] },  // bottom right
+    Vertex { pos: [0.25, 0.25, 0.0], color: [1.0, 0.0, 0.0] },  // top right
+    Vertex { pos: [-0.25, -0.25, 0.0], color: [1.0, 0.0, 0.0] },  // bottom left
+];
 
 struct Renderer {
     window: Arc<winit::window::Window>,
@@ -66,7 +98,8 @@ struct Renderer {
     size: winit::dpi::PhysicalSize<u32>,
     surface: wgpu::Surface<'static>,
     surface_fmt: wgpu::TextureFormat,
-    render_pipeline: wgpu::RenderPipeline
+    render_pipeline: wgpu::RenderPipeline,
+    vbo: wgpu::Buffer
 }
 
 impl Renderer {
@@ -98,13 +131,19 @@ impl Renderer {
             push_constant_ranges: &[],
         });
 
+        let vbo = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: None,
+            contents: bytemuck::cast_slice(VERTICES),
+            usage: wgpu::BufferUsages::VERTEX
+        });
+
         let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor { 
             label: None, 
             layout: Some(&render_pipeline_layout), 
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("vs_main"),
-                buffers: &[],
+                buffers: &[Vertex::desc()],
                 compilation_options: wgpu::PipelineCompilationOptions::default()
             }, 
             primitive: wgpu::PrimitiveState { 
@@ -146,6 +185,7 @@ impl Renderer {
             surface,
             surface_fmt,
             render_pipeline,
+            vbo
         };
 
         renderer.configure_surface();
@@ -170,7 +210,12 @@ impl Renderer {
                         view: &texture_view,
                         depth_slice: None,
                         resolve_target: None,
-                        ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::GREEN), store: wgpu::StoreOp::Store },
+                        ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 5 as f64 / 255.0,
+                            g: 5 as f64 / 255.0,
+                            b: 5 as f64 / 255.0,
+                            a: 1.0,
+                        }), store: wgpu::StoreOp::Store },
                     }
                 )
             ],
@@ -180,7 +225,8 @@ impl Renderer {
         });
 
         renderpass.set_pipeline(&self.render_pipeline);
-        renderpass.draw(0..3, 0..1);
+        renderpass.set_vertex_buffer(0, self.vbo.slice(..));
+        renderpass.draw(0..6, 0..1);
 
         drop(renderpass);
 

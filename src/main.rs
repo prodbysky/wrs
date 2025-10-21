@@ -129,10 +129,81 @@ impl FontVertex {
     }
 }
 
+
+#[derive(Debug)]
 struct Camera {
-    w: f32,
-    h: f32,
+    size: winit::dpi::PhysicalSize<u32>,
+    uniform_buffer: wgpu::Buffer,
+    bind_group: wgpu::BindGroup,
+    bind_group_layout: wgpu::BindGroupLayout,
+    view_proj: [[f32; 4]; 4],
 }
+
+impl Camera {
+    pub fn new_from_size(device: &wgpu::Device, size: winit::dpi::PhysicalSize<u32>) -> Self {
+        let proj = Self::build_proj(&size);
+        let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: None,
+            contents: bytemuck::cast_slice(&[proj]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        // this setups that we can use the orthographic projection in the vertex shader
+        let camera_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+                label: None,
+            });
+        let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &camera_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: camera_buffer.as_entire_binding(),
+            }],
+            label: None,
+        });
+        Self {
+            size,
+            uniform_buffer: camera_buffer,
+            bind_group: camera_bind_group,
+            bind_group_layout: camera_bind_group_layout,
+            view_proj: proj
+        }
+    }
+    pub fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>, queue: &wgpu::Queue) {
+        self.size = new_size;
+        self.view_proj = Self::build_proj(&new_size);
+        queue.write_buffer(
+            &self.uniform_buffer,
+            0,
+            bytemuck::cast_slice(&[self.view_proj]),
+        );
+    }
+
+    fn build_proj(size: &winit::dpi::PhysicalSize<u32>) -> [[f32; 4]; 4]{
+        let m = OPENGL_TO_WGPU_MATRIX
+            * cgmath::ortho(
+                0.0,
+                size.width as f32,
+                size.height as f32,
+                0.0,
+                0.0,
+                2.0,
+            );
+        m.into()
+    }
+}
+
+// get uniform
 
 #[rustfmt::skip]
 pub const OPENGL_TO_WGPU_MATRIX: cgmath::Matrix4<f32> = cgmath::Matrix4::from_cols(
@@ -141,29 +212,6 @@ pub const OPENGL_TO_WGPU_MATRIX: cgmath::Matrix4<f32> = cgmath::Matrix4::from_co
     cgmath::Vector4::new(0.0, 0.0, 0.5, 0.0),
     cgmath::Vector4::new(0.0, 0.0, 0.5, 1.0),
 );
-
-impl Camera {
-    pub fn build(&self) -> cgmath::Matrix4<f32> {
-        OPENGL_TO_WGPU_MATRIX * cgmath::ortho(0.0, self.w, self.h, 0.0, 0.0, 2.0)
-    }
-}
-
-#[repr(C)]
-#[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct CameraUniform {
-    view_proj: [[f32; 4]; 4],
-}
-
-impl CameraUniform {
-    pub fn new() -> Self {
-        Self {
-            view_proj: cgmath::Matrix4::identity().into(),
-        }
-    }
-    pub fn update(&mut self, cam: &Camera) {
-        self.view_proj = cam.build().into();
-    }
-}
 
 struct Renderer {
     window: Arc<winit::window::Window>,
@@ -178,9 +226,6 @@ struct Renderer {
     ibo: wgpu::Buffer,
 
     camera: Camera,
-    camera_uniform: CameraUniform,
-    camera_buffer: wgpu::Buffer,
-    camera_bind_group: wgpu::BindGroup,
 
     draw_vertices: Vec<Vertex>,
     draw_indices: Vec<u16>,
@@ -188,7 +233,7 @@ struct Renderer {
     font_atlas: MonoGlyphAtlas,
     font_bind_group: wgpu::BindGroup,
     font_render_pipeline: wgpu::RenderPipeline,
-     
+
     font_vbo: wgpu::Buffer,
     font_ibo: wgpu::Buffer,
 
@@ -339,51 +384,14 @@ impl Renderer {
 
         let surface_fmt = capabilities.formats[0];
 
-        // camera setup begin
-        let camera = Camera {
-            w: size.width as f32,
-            h: size.height as f32,
-        };
-
-        let mut camera_uniform = CameraUniform::new();
-        camera_uniform.update(&camera);
-        let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: None,
-            contents: bytemuck::cast_slice(&[camera_uniform]),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        });
-
-        // this setups that we can use the orthographic projection in the vertex shader
-        let camera_bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                }],
-                label: None,
-            });
-        let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            layout: &camera_bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: camera_buffer.as_entire_binding(),
-            }],
-            label: None,
-        });
-        // camera setup end
+        let cam = Camera::new_from_size(&device, size);
 
         // quad renderer pipeline
         let quad_shader = device.create_shader_module(wgpu::include_wgsl!("quad_shader.wgsl"));
         let quad_render_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: None,
-                bind_group_layouts: &[&camera_bind_group_layout],
+                bind_group_layouts: &[&cam.bind_group_layout],
                 push_constant_ranges: &[],
             });
 
@@ -471,7 +479,7 @@ impl Renderer {
         let font_render_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: None,
-                bind_group_layouts: &[&camera_bind_group_layout, &font_bind_group_layout],
+                bind_group_layouts: &[&cam.bind_group_layout, &font_bind_group_layout],
                 push_constant_ranges: &[],
             });
 
@@ -543,10 +551,7 @@ impl Renderer {
 
             quad_render_pipeline,
 
-            camera,
-            camera_uniform,
-            camera_buffer,
-            camera_bind_group,
+            camera: cam,
 
             draw_indices: vec![],
             draw_vertices: vec![],
@@ -613,7 +618,10 @@ impl Renderer {
         let start = self.font_draw_vertices.len() as u16;
 
         let (u0, v0, u1, v1) = *self.font_atlas.glyph_map.get(&c).unwrap();
-        let (w, h) = (self.font_atlas.cell_size.0 as f32, self.font_atlas.cell_size.1 as f32);
+        let (w, h) = (
+            self.font_atlas.cell_size.0 as f32,
+            self.font_atlas.cell_size.1 as f32,
+        );
 
         self.font_draw_vertices.extend_from_slice(&[
             FontVertex {
@@ -686,7 +694,9 @@ impl Renderer {
                 .write_buffer(&self.ibo, 0, bytemuck::cast_slice(&self.draw_indices));
         }
 
-        if (self.font_vbo.size() as usize) < self.font_draw_vertices.len() * std::mem::size_of::<FontVertex>() {
+        if (self.font_vbo.size() as usize)
+            < self.font_draw_vertices.len() * std::mem::size_of::<FontVertex>()
+        {
             self.font_vbo.destroy();
             let vbo = self
                 .device
@@ -697,11 +707,16 @@ impl Renderer {
                 });
             self.font_vbo = vbo;
         } else {
-            self.queue
-                .write_buffer(&self.font_vbo, 0, bytemuck::cast_slice(&self.font_draw_vertices));
+            self.queue.write_buffer(
+                &self.font_vbo,
+                0,
+                bytemuck::cast_slice(&self.font_draw_vertices),
+            );
         }
 
-        if (self.font_ibo.size() as usize) < self.font_draw_indices.len() * std::mem::size_of::<u16>() {
+        if (self.font_ibo.size() as usize)
+            < self.font_draw_indices.len() * std::mem::size_of::<u16>()
+        {
             self.font_ibo.destroy();
             let ibo = self
                 .device
@@ -712,8 +727,11 @@ impl Renderer {
                 });
             self.font_ibo = ibo;
         } else {
-            self.queue
-                .write_buffer(&self.font_ibo, 0, bytemuck::cast_slice(&self.font_draw_indices));
+            self.queue.write_buffer(
+                &self.font_ibo,
+                0,
+                bytemuck::cast_slice(&self.font_draw_indices),
+            );
         }
     }
 
@@ -746,7 +764,7 @@ impl Renderer {
 
         if self.draw_quads {
             renderpass.set_pipeline(&self.quad_render_pipeline);
-            renderpass.set_bind_group(0, &self.camera_bind_group, &[]);
+            renderpass.set_bind_group(0, &self.camera.bind_group, &[]);
             renderpass.set_vertex_buffer(0, self.vbo.slice(..));
             renderpass.set_index_buffer(self.ibo.slice(..), wgpu::IndexFormat::Uint16);
             renderpass.draw_indexed(0..self.draw_indices.len() as u32, 0, 0..1);
@@ -754,7 +772,7 @@ impl Renderer {
 
         if self.draw_font {
             renderpass.set_pipeline(&self.font_render_pipeline);
-            renderpass.set_bind_group(0, &self.camera_bind_group, &[]);
+            renderpass.set_bind_group(0, &self.camera.bind_group, &[]);
             renderpass.set_bind_group(1, &self.font_bind_group, &[]);
             renderpass.set_vertex_buffer(0, self.font_vbo.slice(..));
             renderpass.set_index_buffer(self.font_ibo.slice(..), wgpu::IndexFormat::Uint16);
@@ -770,14 +788,7 @@ impl Renderer {
 
     pub fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
         self.size = new_size;
-        self.camera.w = new_size.width as f32;
-        self.camera.h = new_size.height as f32;
-        self.camera_uniform.update(&self.camera);
-        self.queue.write_buffer(
-            &self.camera_buffer,
-            0,
-            bytemuck::cast_slice(&[self.camera_uniform]),
-        );
+        self.camera.resize(new_size, &self.queue);
         self.configure_surface();
     }
 

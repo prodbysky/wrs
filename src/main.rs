@@ -258,6 +258,8 @@ impl Renderer {
             cache: None,
         });
 
+        // font setup
+
         let renderer = Self {
             window,
             vbo: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {

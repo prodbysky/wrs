@@ -17,8 +17,6 @@ struct CameraUniform {
 @group(0) @binding(0)
 var<uniform> camera: CameraUniform;
 
-
-
 @vertex
 fn vs_main(
     model: VertexIn
@@ -30,12 +28,16 @@ fn vs_main(
     return out;
 }
 
-@group(0) @binding(1)
+@group(1) @binding(0)
 var t_diffuse: texture_2d<f32>;
-@group(0) @binding(2)
+@group(1) @binding(1)
 var s_diffuse: sampler;
 
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
-    return textureSample(t_diffuse, s_diffuse, in.texture_coords);
+    let tex = textureSample(t_diffuse, s_diffuse, in.texture_coords);
+    if tex.a < 0.001 {
+        discard;
+    }
+    return vec4<f32>(in.color * tex.rgb, tex.a);
 }

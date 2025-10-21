@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{process::exit, sync::Arc};
 
 use cgmath::SquareMatrix;
 use image::EncodableLayout;
@@ -40,11 +40,13 @@ impl winit::application::ApplicationHandler for App {
         event: winit::event::WindowEvent,
     ) {
         let renderer = self.renderer.as_mut().unwrap();
+
         renderer.begin_frame();
-        renderer.draw_quad(0.0, 0.0, 100.0, 100.0, [1.0, 1.0, 1.0]);
-        renderer.draw_quad(100.0, 100.0, 100.0, 100.0, [1.0, 1.0, 1.0]);
-        renderer.draw_quad(200.0, 200.0, 100.0, 100.0, [1.0, 1.0, 1.0]);
-        renderer.draw_quad(300.0, 300.0, 100.0, 100.0, [1.0, 1.0, 1.0]);
+        renderer.draw_quad(0.0, 0.0, 100.0, 100.0, [0.0, 0.0, 0.0]);
+        // renderer.draw_quad(100.0, 100.0, 100.0, 100.0, [1.0, 1.0, 1.0]);
+        // renderer.draw_quad(200.0, 200.0, 100.0, 100.0, [1.0, 1.0, 1.0]);
+        // renderer.draw_quad(300.0, 300.0, 100.0, 100.0, [1.0, 1.0, 1.0]);
+        renderer.draw_font_quad(50.0, 50.0, [1.0, 1.0, 1.0], 'A');
         renderer.end_frame();
 
         match event {
@@ -185,9 +187,16 @@ struct Renderer {
 
     font_atlas: MonoGlyphAtlas,
     font_bind_group: wgpu::BindGroup,
+    font_render_pipeline: wgpu::RenderPipeline,
+     
+    font_vbo: wgpu::Buffer,
+    font_ibo: wgpu::Buffer,
 
     font_draw_vertices: Vec<FontVertex>,
     font_draw_indices: Vec<u16>,
+
+    draw_quads: bool,
+    draw_font: bool,
 }
 
 pub struct MonoGlyphAtlas {
@@ -256,7 +265,7 @@ pub fn create_monospace_atlas(
     }
 
     let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("Monospace Glyph Atlas"),
+        label: None,
         size: wgpu::Extent3d {
             width: atlas_width,
             height: atlas_height,
@@ -418,7 +427,7 @@ impl Renderer {
 
         // font setup
         let font = include_bytes!("iosevka-regular.ttf");
-        let atlas = create_monospace_atlas(&device, &queue, font, 32.0);
+        let atlas = create_monospace_atlas(&device, &queue, font, 128.0);
 
         let font_shader = device.create_shader_module(wgpu::include_wgsl!("font_shader.wgsl"));
         let font_bind_group_layout =
@@ -427,16 +436,6 @@ impl Renderer {
                 entries: &[
                     wgpu::BindGroupLayoutEntry {
                         binding: 0,
-                        visibility: wgpu::ShaderStages::VERTEX,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
                         visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Texture {
                             multisampled: false,
@@ -446,7 +445,7 @@ impl Renderer {
                         count: None,
                     },
                     wgpu::BindGroupLayoutEntry {
-                        binding: 2,
+                        binding: 1,
                         visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                         count: None,
@@ -459,26 +458,20 @@ impl Renderer {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::Buffer(
-                        camera_buffer.as_entire_buffer_binding(),
-                    ),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
                     resource: wgpu::BindingResource::TextureView(&atlas.view),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 2,
+                    binding: 1,
                     resource: wgpu::BindingResource::Sampler(&atlas.sampler),
                 },
             ],
-            label: Some("diffuse_bind_group"),
+            label: None,
         });
 
         let font_render_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: None,
-                bind_group_layouts: &[&font_bind_group_layout],
+                bind_group_layouts: &[&camera_bind_group_layout, &font_bind_group_layout],
                 push_constant_ranges: &[],
             });
 
@@ -532,6 +525,16 @@ impl Renderer {
                 contents: &[],
                 usage: wgpu::BufferUsages::INDEX,
             }),
+            font_vbo: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: None,
+                contents: &[],
+                usage: wgpu::BufferUsages::VERTEX,
+            }),
+            font_ibo: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: None,
+                contents: &[],
+                usage: wgpu::BufferUsages::INDEX,
+            }),
             device,
             queue,
             size,
@@ -552,6 +555,10 @@ impl Renderer {
             font_bind_group,
             font_draw_indices: vec![],
             font_draw_vertices: vec![],
+
+            font_render_pipeline,
+            draw_font: false,
+            draw_quads: false,
         };
 
         renderer.configure_surface();
@@ -562,9 +569,14 @@ impl Renderer {
     pub fn begin_frame(&mut self) {
         self.draw_vertices.clear();
         self.draw_indices.clear();
+        self.font_draw_vertices.clear();
+        self.font_draw_indices.clear();
+        self.draw_font = false;
+        self.draw_quads = false;
     }
 
     pub fn draw_quad(&mut self, x: f32, y: f32, w: f32, h: f32, color: [f32; 3]) {
+        self.draw_quads = true;
         let start = self.draw_vertices.len() as u16;
 
         self.draw_vertices.extend_from_slice(&[
@@ -596,8 +608,51 @@ impl Renderer {
         ]);
     }
 
+    pub fn draw_font_quad(&mut self, x: f32, y: f32, color: [f32; 3], c: char) {
+        self.draw_font = true;
+        let start = self.font_draw_vertices.len() as u16;
+
+        let (u0, v0, u1, v1) = *self.font_atlas.glyph_map.get(&c).unwrap();
+        let (w, h) = (self.font_atlas.cell_size.0 as f32, self.font_atlas.cell_size.1 as f32);
+
+        self.font_draw_vertices.extend_from_slice(&[
+            FontVertex {
+                pos: [x, y, 0.0],
+                texture_coords: [u0, v0],
+                color,
+            },
+            FontVertex {
+                pos: [x + w, y, 0.0],
+                texture_coords: [u1, v0],
+                color,
+            },
+            FontVertex {
+                pos: [x + w, y + h, 0.0],
+                texture_coords: [u1, v1],
+                color,
+            },
+            FontVertex {
+                pos: [x, y + h, 0.0],
+                texture_coords: [u0, v1],
+                color,
+            },
+        ]);
+
+        self.font_draw_indices.extend_from_slice(&[
+            start,
+            start + 1,
+            start + 2,
+            start,
+            start + 2,
+            start + 3,
+        ]);
+    }
+
     pub fn end_frame(&mut self) {
         if self.draw_vertices.is_empty() {
+            return;
+        }
+        if self.font_draw_vertices.is_empty() {
             return;
         }
 
@@ -630,6 +685,36 @@ impl Renderer {
             self.queue
                 .write_buffer(&self.ibo, 0, bytemuck::cast_slice(&self.draw_indices));
         }
+
+        if (self.font_vbo.size() as usize) < self.font_draw_vertices.len() * std::mem::size_of::<FontVertex>() {
+            self.font_vbo.destroy();
+            let vbo = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: None,
+                    contents: bytemuck::cast_slice(&self.font_draw_vertices),
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                });
+            self.font_vbo = vbo;
+        } else {
+            self.queue
+                .write_buffer(&self.font_vbo, 0, bytemuck::cast_slice(&self.font_draw_vertices));
+        }
+
+        if (self.font_ibo.size() as usize) < self.font_draw_indices.len() * std::mem::size_of::<u16>() {
+            self.font_ibo.destroy();
+            let ibo = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: None,
+                    contents: bytemuck::cast_slice(&self.font_draw_indices),
+                    usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+                });
+            self.font_ibo = ibo;
+        } else {
+            self.queue
+                .write_buffer(&self.font_ibo, 0, bytemuck::cast_slice(&self.font_draw_indices));
+        }
     }
 
     pub fn render(&mut self) {
@@ -659,11 +744,22 @@ impl Renderer {
             occlusion_query_set: None,
         });
 
-        renderpass.set_pipeline(&self.quad_render_pipeline);
-        renderpass.set_bind_group(0, &self.camera_bind_group, &[]);
-        renderpass.set_vertex_buffer(0, self.vbo.slice(..));
-        renderpass.set_index_buffer(self.ibo.slice(..), wgpu::IndexFormat::Uint16);
-        renderpass.draw_indexed(0..self.draw_indices.len() as u32, 0, 0..1);
+        if self.draw_quads {
+            renderpass.set_pipeline(&self.quad_render_pipeline);
+            renderpass.set_bind_group(0, &self.camera_bind_group, &[]);
+            renderpass.set_vertex_buffer(0, self.vbo.slice(..));
+            renderpass.set_index_buffer(self.ibo.slice(..), wgpu::IndexFormat::Uint16);
+            renderpass.draw_indexed(0..self.draw_indices.len() as u32, 0, 0..1);
+        }
+
+        if self.draw_font {
+            renderpass.set_pipeline(&self.font_render_pipeline);
+            renderpass.set_bind_group(0, &self.camera_bind_group, &[]);
+            renderpass.set_bind_group(1, &self.font_bind_group, &[]);
+            renderpass.set_vertex_buffer(0, self.font_vbo.slice(..));
+            renderpass.set_index_buffer(self.font_ibo.slice(..), wgpu::IndexFormat::Uint16);
+            renderpass.draw_indexed(0..self.font_draw_indices.len() as u32, 0, 0..1);
+        }
 
         drop(renderpass);
 

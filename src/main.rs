@@ -41,6 +41,9 @@ impl winit::application::ApplicationHandler for App {
         let renderer = self.renderer.as_mut().unwrap();
         renderer.begin_frame();
         renderer.draw_quad(0.0, 0.0, 100.0, 100.0, [1.0, 1.0, 1.0]);
+        renderer.draw_quad(100.0, 100.0, 100.0, 100.0, [1.0, 1.0, 1.0]);
+        renderer.draw_quad(200.0, 200.0, 100.0, 100.0, [1.0, 1.0, 1.0]);
+        renderer.draw_quad(300.0, 300.0, 100.0, 100.0, [1.0, 1.0, 1.0]);
         renderer.end_frame();
 
         match event {
@@ -133,7 +136,7 @@ struct Renderer {
     size: winit::dpi::PhysicalSize<u32>,
     surface: wgpu::Surface<'static>,
     surface_fmt: wgpu::TextureFormat,
-    render_pipeline: wgpu::RenderPipeline,
+    quad_render_pipeline: wgpu::RenderPipeline,
 
     vbo: wgpu::Buffer,
     ibo: wgpu::Buffer,
@@ -168,8 +171,9 @@ impl Renderer {
 
         let surface_fmt = capabilities.formats[0];
 
-        let shader = device.create_shader_module(wgpu::include_wgsl!("shader.wgsl"));
+        let quad_shader = device.create_shader_module(wgpu::include_wgsl!("quad_shader.wgsl"));
 
+        // camera setup begin
         let camera = Camera {
             w: size.width as f32,
             h: size.height as f32,
@@ -183,6 +187,7 @@ impl Renderer {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
+        // this setups that we can use the orthographic projection in the vertex shader
         let camera_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 entries: &[wgpu::BindGroupLayoutEntry {
@@ -197,7 +202,6 @@ impl Renderer {
                 }],
                 label: None,
             });
-
         let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             layout: &camera_bind_group_layout,
             entries: &[wgpu::BindGroupEntry {
@@ -206,19 +210,21 @@ impl Renderer {
             }],
             label: None,
         });
+        // camera setup end
 
-        let render_pipeline_layout =
+        // quad renderer pipeline
+        let quad_render_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: None,
                 bind_group_layouts: &[&camera_bind_group_layout],
                 push_constant_ranges: &[],
             });
 
-        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let quad_render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: None,
-            layout: Some(&render_pipeline_layout),
+            layout: Some(&quad_render_pipeline_layout),
             vertex: wgpu::VertexState {
-                module: &shader,
+                module: &quad_shader,
                 entry_point: Some("vs_main"),
                 buffers: &[Vertex::desc()],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
@@ -239,7 +245,7 @@ impl Renderer {
                 alpha_to_coverage_enabled: false,
             },
             fragment: Some(wgpu::FragmentState {
-                module: &shader,
+                module: &quad_shader,
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: surface_fmt,
@@ -269,7 +275,7 @@ impl Renderer {
             size,
             surface,
             surface_fmt,
-            render_pipeline,
+            quad_render_pipeline,
             camera,
             camera_uniform,
             camera_buffer,
@@ -383,7 +389,7 @@ impl Renderer {
             occlusion_query_set: None,
         });
 
-        renderpass.set_pipeline(&self.render_pipeline);
+        renderpass.set_pipeline(&self.quad_render_pipeline);
         renderpass.set_bind_group(0, &self.camera_bind_group, &[]);
         renderpass.set_vertex_buffer(0, self.vbo.slice(..));
         renderpass.set_index_buffer(self.ibo.slice(..), wgpu::IndexFormat::Uint16);

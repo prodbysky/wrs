@@ -241,7 +241,7 @@ pub struct QuadRenderer {
 }
 
 impl QuadRenderer {
-    pub fn new(device: &wgpu::Device, cam: &Camera, surface_fmt: wgpu::TextureFormat) -> Self {
+    fn new(device: &wgpu::Device, cam: &Camera, surface_fmt: wgpu::TextureFormat) -> Self {
         let shader = device.create_shader_module(wgpu::include_wgsl!("quad_shader.wgsl"));
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: None,
@@ -328,7 +328,7 @@ impl QuadRenderer {
         self.indices
             .extend_from_slice(&[start, start + 1, start + 2, start, start + 2, start + 3]);
     }
-    pub fn flush(
+    fn flush(
         &mut self,
         render_pass: &mut wgpu::RenderPass,
         device: &wgpu::Device,
@@ -526,53 +526,6 @@ impl Renderer {
         let surface_fmt = capabilities.formats[0];
 
         let cam = Camera::new_from_size(&device, size);
-
-        // quad renderer pipeline
-        let quad_shader = device.create_shader_module(wgpu::include_wgsl!("quad_shader.wgsl"));
-        let quad_render_pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: None,
-                bind_group_layouts: &[&cam.bind_group_layout],
-                push_constant_ranges: &[],
-            });
-
-        let quad_render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: None,
-            layout: Some(&quad_render_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &quad_shader,
-                entry_point: Some("vs_main"),
-                buffers: &[Vertex::desc()],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            },
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Cw,
-                cull_mode: None,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState {
-                count: 1,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &quad_shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: surface_fmt,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            }),
-            multiview: None,
-            cache: None,
-        });
 
         // font setup
         let font = include_bytes!("iosevka-regular.ttf");

@@ -47,7 +47,7 @@ impl winit::application::ApplicationHandler for App {
         // renderer.draw_quad(100.0, 100.0, 100.0, 100.0, [1.0, 1.0, 1.0]);
         // renderer.draw_quad(200.0, 200.0, 100.0, 100.0, [1.0, 1.0, 1.0]);
         // renderer.draw_quad(300.0, 300.0, 100.0, 100.0, [1.0, 1.0, 1.0]);
-        renderer.draw_font_quad(50.0, 50.0, [1.0, 1.0, 1.0], 'A');
+        renderer.font_renderer.push(50.0, 50.0, [1.0, 1.0, 1.0], 'A', &renderer.font_atlas);
         renderer.end_frame();
 
         match event {
@@ -196,8 +196,6 @@ impl Camera {
     }
 }
 
-// get uniform
-
 #[rustfmt::skip]
 pub const OPENGL_TO_WGPU_MATRIX: cgmath::Matrix4<f32> = cgmath::Matrix4::from_cols(
     cgmath::Vector4::new(1.0, 0.0, 0.0, 0.0),
@@ -219,21 +217,21 @@ struct Renderer {
     quad_renderer: QuadRenderer,
 
     font_atlas: MonoGlyphAtlas,
-    font_bind_group: wgpu::BindGroup,
-    font_render_pipeline: wgpu::RenderPipeline,
-
-    font_vbo: wgpu::Buffer,
-    font_ibo: wgpu::Buffer,
-
-    font_draw_vertices: Vec<FontVertex>,
-    font_draw_indices: Vec<u16>,
-
-    draw_font: bool,
+    font_renderer: FontRenderer
 }
 
 pub struct QuadRenderer {
     render_pipeline: wgpu::RenderPipeline,
     vertices: Vec<Vertex>,
+    indices: Vec<u16>,
+    vbo: wgpu::Buffer,
+    ibo: wgpu::Buffer,
+    has_data: bool,
+}
+
+pub struct FontRenderer {
+    render_pipeline: wgpu::RenderPipeline,
+    vertices: Vec<FontVertex>,
     indices: Vec<u16>,
     vbo: wgpu::Buffer,
     ibo: wgpu::Buffer,
@@ -385,10 +383,178 @@ impl QuadRenderer {
     }
 }
 
+impl FontRenderer {
+    fn new(device: &wgpu::Device, cam: &Camera, atlas: &MonoGlyphAtlas, surface_fmt: wgpu::TextureFormat) -> Self {
+        let shader = device.create_shader_module(wgpu::include_wgsl!("font_shader.wgsl"));
+
+        let render_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: None,
+                bind_group_layouts: &[&cam.bind_group_layout, &atlas.bind_group_layout],
+                push_constant_ranges: &[],
+            });
+
+        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: None,
+            layout: Some(&render_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[FontVertex::desc()],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Cw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_fmt,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            multiview: None,
+            cache: None,
+        });
+        Self {
+            render_pipeline,
+            vertices: vec![],
+            indices: vec![],
+            vbo: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: None,
+                contents: &[],
+                usage: wgpu::BufferUsages::VERTEX,
+            }),
+            ibo: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: None,
+                contents: &[],
+                usage: wgpu::BufferUsages::INDEX,
+            }),
+            has_data: false,
+        }
+    }
+    pub fn push(&mut self, x: f32, y: f32, color: [f32; 3], c: char, atlas: &MonoGlyphAtlas) {
+        self.has_data = true;
+        let start = self.vertices.len() as u16;
+
+        let (u0, v0, u1, v1) = *atlas.glyph_map.get(&c).unwrap();
+        let (w, h) = (
+            atlas.cell_size.0 as f32,
+            atlas.cell_size.1 as f32,
+        );
+
+        self.vertices.extend_from_slice(&[
+            FontVertex {
+                pos: [x, y, 0.0],
+                texture_coords: [u0, v0],
+                color,
+            },
+            FontVertex {
+                pos: [x + w, y, 0.0],
+                texture_coords: [u1, v0],
+                color,
+            },
+            FontVertex {
+                pos: [x + w, y + h, 0.0],
+                texture_coords: [u1, v1],
+                color,
+            },
+            FontVertex {
+                pos: [x, y + h, 0.0],
+                texture_coords: [u0, v1],
+                color,
+            },
+        ]);
+
+        self.indices.extend_from_slice(&[
+            start,
+            start + 1,
+            start + 2,
+            start,
+            start + 2,
+            start + 3,
+        ]);
+    }
+    fn flush(
+        &mut self,
+        render_pass: &mut wgpu::RenderPass,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        cam: &Camera,
+        atlas: &MonoGlyphAtlas
+    ) {
+        if self.has_data {
+            self.upload_data(device, queue);
+            render_pass.set_pipeline(&self.render_pipeline);
+            render_pass.set_bind_group(0, &cam.bind_group, &[]);
+            render_pass.set_bind_group(1, &atlas.bind_group, &[]);
+            render_pass.set_vertex_buffer(0, self.vbo.slice(..));
+            render_pass.set_index_buffer(self.ibo.slice(..), wgpu::IndexFormat::Uint16);
+            render_pass.draw_indexed(0..self.indices.len() as u32, 0, 0..1);        
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.indices.clear();
+        self.vertices.clear();
+        self.has_data = false;
+    }
+
+    pub fn empty(&self) -> bool {
+        self.vertices.is_empty()
+    }
+
+    fn upload_data(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        if self.vertices.is_empty() {
+            return;
+        }
+        if (self.vbo.size() as usize) < self.vertices.len() * std::mem::size_of::<Vertex>() {
+            self.vbo.destroy();
+            let vbo = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: None,
+                contents: bytemuck::cast_slice(&self.vertices),
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            });
+            self.vbo = vbo;
+        } else {
+            queue.write_buffer(&self.vbo, 0, bytemuck::cast_slice(&self.vertices));
+        }
+
+        if (self.ibo.size() as usize) < self.indices.len() * std::mem::size_of::<u16>() {
+            self.ibo.destroy();
+            let ibo = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: None,
+                contents: bytemuck::cast_slice(&self.indices),
+                usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+            });
+            self.ibo = ibo;
+        } else {
+            queue.write_buffer(&self.ibo, 0, bytemuck::cast_slice(&self.indices));
+        }
+    }
+}
+
 pub struct MonoGlyphAtlas {
     pub texture: wgpu::Texture,
     pub view: wgpu::TextureView,
     pub sampler: wgpu::Sampler,
+    pub bind_group: wgpu::BindGroup,
+    pub bind_group_layout: wgpu::BindGroupLayout,
     pub glyph_map: std::collections::HashMap<char, (f32, f32, f32, f32)>,
     pub cell_size: (u32, u32),
 }
@@ -494,6 +660,43 @@ pub fn create_monospace_atlas(
         min_filter: wgpu::FilterMode::Linear,
         ..Default::default()
     });
+    let bind_group_layout =
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: None,
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    multisampled: false,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+        ],
+    });
+
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        layout: &bind_group_layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(&sampler),
+            },
+        ],
+        label: None,
+    });
 
     MonoGlyphAtlas {
         texture,
@@ -501,6 +704,8 @@ pub fn create_monospace_atlas(
         sampler,
         glyph_map,
         cell_size: (cell_w, cell_h),
+        bind_group,
+        bind_group_layout
     }
 }
 
@@ -617,17 +822,8 @@ impl Renderer {
 
         let renderer = Self {
             window,
-            font_vbo: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: None,
-                contents: &[],
-                usage: wgpu::BufferUsages::VERTEX,
-            }),
-            font_ibo: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: None,
-                contents: &[],
-                usage: wgpu::BufferUsages::INDEX,
-            }),
             quad_renderer: QuadRenderer::new(&device, &cam, surface_fmt),
+            font_renderer: FontRenderer::new(&device, &cam, &atlas, surface_fmt),
 
             device,
             queue,
@@ -638,12 +834,7 @@ impl Renderer {
             camera: cam,
 
             font_atlas: atlas,
-            font_bind_group,
-            font_draw_indices: vec![],
-            font_draw_vertices: vec![],
 
-            font_render_pipeline,
-            draw_font: false,
         };
 
         renderer.configure_surface();
@@ -653,103 +844,19 @@ impl Renderer {
 
     pub fn begin_frame(&mut self) {
         self.quad_renderer.clear();
-        self.font_draw_vertices.clear();
-        self.font_draw_indices.clear();
-        self.draw_font = false;
-    }
-
-    pub fn draw_font_quad(&mut self, x: f32, y: f32, color: [f32; 3], c: char) {
-        self.draw_font = true;
-        let start = self.font_draw_vertices.len() as u16;
-
-        let (u0, v0, u1, v1) = *self.font_atlas.glyph_map.get(&c).unwrap();
-        let (w, h) = (
-            self.font_atlas.cell_size.0 as f32,
-            self.font_atlas.cell_size.1 as f32,
-        );
-
-        self.font_draw_vertices.extend_from_slice(&[
-            FontVertex {
-                pos: [x, y, 0.0],
-                texture_coords: [u0, v0],
-                color,
-            },
-            FontVertex {
-                pos: [x + w, y, 0.0],
-                texture_coords: [u1, v0],
-                color,
-            },
-            FontVertex {
-                pos: [x + w, y + h, 0.0],
-                texture_coords: [u1, v1],
-                color,
-            },
-            FontVertex {
-                pos: [x, y + h, 0.0],
-                texture_coords: [u0, v1],
-                color,
-            },
-        ]);
-
-        self.font_draw_indices.extend_from_slice(&[
-            start,
-            start + 1,
-            start + 2,
-            start,
-            start + 2,
-            start + 3,
-        ]);
+        self.font_renderer.clear();
     }
 
     pub fn end_frame(&mut self) {
         if self.quad_renderer.empty() {
             return;
         }
-        if self.font_draw_vertices.is_empty() {
+        if self.font_renderer.empty() {
             return;
         }
 
         self.quad_renderer.upload_data(&self.device, &self.queue);
-
-        if (self.font_vbo.size() as usize)
-            < self.font_draw_vertices.len() * std::mem::size_of::<FontVertex>()
-        {
-            self.font_vbo.destroy();
-            let vbo = self
-                .device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: None,
-                    contents: bytemuck::cast_slice(&self.font_draw_vertices),
-                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                });
-            self.font_vbo = vbo;
-        } else {
-            self.queue.write_buffer(
-                &self.font_vbo,
-                0,
-                bytemuck::cast_slice(&self.font_draw_vertices),
-            );
-        }
-
-        if (self.font_ibo.size() as usize)
-            < self.font_draw_indices.len() * std::mem::size_of::<u16>()
-        {
-            self.font_ibo.destroy();
-            let ibo = self
-                .device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: None,
-                    contents: bytemuck::cast_slice(&self.font_draw_indices),
-                    usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
-                });
-            self.font_ibo = ibo;
-        } else {
-            self.queue.write_buffer(
-                &self.font_ibo,
-                0,
-                bytemuck::cast_slice(&self.font_draw_indices),
-            );
-        }
+        self.font_renderer.upload_data(&self.device, &self.queue);
     }
 
     pub fn render(&mut self) {
@@ -782,14 +889,8 @@ impl Renderer {
         self.quad_renderer
             .flush(&mut renderpass, &self.device, &self.queue, &self.camera);
 
-        if self.draw_font {
-            renderpass.set_pipeline(&self.font_render_pipeline);
-            renderpass.set_bind_group(0, &self.camera.bind_group, &[]);
-            renderpass.set_bind_group(1, &self.font_bind_group, &[]);
-            renderpass.set_vertex_buffer(0, self.font_vbo.slice(..));
-            renderpass.set_index_buffer(self.font_ibo.slice(..), wgpu::IndexFormat::Uint16);
-            renderpass.draw_indexed(0..self.font_draw_indices.len() as u32, 0, 0..1);
-        }
+        self.font_renderer
+            .flush(&mut renderpass, &self.device, &self.queue, &self.camera, &self.font_atlas);
 
         drop(renderpass);
 

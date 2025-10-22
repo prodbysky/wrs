@@ -3,6 +3,10 @@ name = "wrs"
 version = "0.1.0"
 edition = "2024"
 
+[profile.release]
+strip = true
+lto = true
+
 [dependencies]
 ab_glyph = "0.2.32"
 bytemuck = { version = "1.24.0", features = [ "derive" ] }

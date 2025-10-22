@@ -1,6 +1,5 @@
-use std::{process::exit, sync::Arc};
+use std::sync::Arc;
 
-use cgmath::SquareMatrix;
 use image::EncodableLayout;
 use wgpu::util::DeviceExt;
 
@@ -42,7 +41,9 @@ impl winit::application::ApplicationHandler for App {
         let renderer = self.renderer.as_mut().unwrap();
 
         renderer.begin_frame();
-        renderer.draw_quad(0.0, 0.0, 100.0, 100.0, [0.0, 0.0, 0.0]);
+        renderer
+            .quad_renderer
+            .push(0.0, 0.0, 100.0, 100.0, [0.0, 1.0, 0.0]);
         // renderer.draw_quad(100.0, 100.0, 100.0, 100.0, [1.0, 1.0, 1.0]);
         // renderer.draw_quad(200.0, 200.0, 100.0, 100.0, [1.0, 1.0, 1.0]);
         // renderer.draw_quad(300.0, 300.0, 100.0, 100.0, [1.0, 1.0, 1.0]);
@@ -129,7 +130,6 @@ impl FontVertex {
     }
 }
 
-
 #[derive(Debug)]
 struct Camera {
     size: winit::dpi::PhysicalSize<u32>,
@@ -176,7 +176,7 @@ impl Camera {
             uniform_buffer: camera_buffer,
             bind_group: camera_bind_group,
             bind_group_layout: camera_bind_group_layout,
-            view_proj: proj
+            view_proj: proj,
         }
     }
     pub fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>, queue: &wgpu::Queue) {
@@ -189,16 +189,9 @@ impl Camera {
         );
     }
 
-    fn build_proj(size: &winit::dpi::PhysicalSize<u32>) -> [[f32; 4]; 4]{
+    fn build_proj(size: &winit::dpi::PhysicalSize<u32>) -> [[f32; 4]; 4] {
         let m = OPENGL_TO_WGPU_MATRIX
-            * cgmath::ortho(
-                0.0,
-                size.width as f32,
-                size.height as f32,
-                0.0,
-                0.0,
-                2.0,
-            );
+            * cgmath::ortho(0.0, size.width as f32, size.height as f32, 0.0, 0.0, 2.0);
         m.into()
     }
 }
@@ -220,15 +213,10 @@ struct Renderer {
     size: winit::dpi::PhysicalSize<u32>,
     surface: wgpu::Surface<'static>,
     surface_fmt: wgpu::TextureFormat,
-    quad_render_pipeline: wgpu::RenderPipeline,
-
-    vbo: wgpu::Buffer,
-    ibo: wgpu::Buffer,
 
     camera: Camera,
 
-    draw_vertices: Vec<Vertex>,
-    draw_indices: Vec<u16>,
+    quad_renderer: QuadRenderer,
 
     font_atlas: MonoGlyphAtlas,
     font_bind_group: wgpu::BindGroup,
@@ -240,8 +228,161 @@ struct Renderer {
     font_draw_vertices: Vec<FontVertex>,
     font_draw_indices: Vec<u16>,
 
-    draw_quads: bool,
     draw_font: bool,
+}
+
+pub struct QuadRenderer {
+    render_pipeline: wgpu::RenderPipeline,
+    vertices: Vec<Vertex>,
+    indices: Vec<u16>,
+    vbo: wgpu::Buffer,
+    ibo: wgpu::Buffer,
+    has_data: bool,
+}
+
+impl QuadRenderer {
+    pub fn new(device: &wgpu::Device, cam: &Camera, surface_fmt: wgpu::TextureFormat) -> Self {
+        let shader = device.create_shader_module(wgpu::include_wgsl!("quad_shader.wgsl"));
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: None,
+            bind_group_layouts: &[&cam.bind_group_layout],
+            push_constant_ranges: &[],
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: None,
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[Vertex::desc()],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Cw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_fmt,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            multiview: None,
+            cache: None,
+        });
+        Self {
+            render_pipeline: pipeline,
+            vertices: vec![],
+            indices: vec![],
+            vbo: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: None,
+                contents: &[],
+                usage: wgpu::BufferUsages::VERTEX,
+            }),
+            ibo: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: None,
+                contents: &[],
+                usage: wgpu::BufferUsages::INDEX,
+            }),
+            has_data: false,
+        }
+    }
+    pub fn push(&mut self, x: f32, y: f32, w: f32, h: f32, color: [f32; 3]) {
+        self.has_data = true;
+        let start = self.vertices.len() as u16;
+
+        self.vertices.extend_from_slice(&[
+            Vertex {
+                pos: [x, y, 0.0],
+                color,
+            },
+            Vertex {
+                pos: [x + w, y, 0.0],
+                color,
+            },
+            Vertex {
+                pos: [x + w, y + h, 0.0],
+                color,
+            },
+            Vertex {
+                pos: [x, y + h, 0.0],
+                color,
+            },
+        ]);
+
+        self.indices
+            .extend_from_slice(&[start, start + 1, start + 2, start, start + 2, start + 3]);
+    }
+    pub fn flush(
+        &mut self,
+        render_pass: &mut wgpu::RenderPass,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        cam: &Camera,
+    ) {
+        if self.has_data {
+            self.upload_data(device, queue);
+            render_pass.set_pipeline(&self.render_pipeline);
+            render_pass.set_bind_group(0, &cam.bind_group, &[]);
+            render_pass.set_vertex_buffer(0, self.vbo.slice(..));
+            render_pass.set_index_buffer(self.ibo.slice(..), wgpu::IndexFormat::Uint16);
+            render_pass.draw_indexed(0..self.indices.len() as u32, 0, 0..1);
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.indices.clear();
+        self.vertices.clear();
+        self.has_data = false;
+    }
+
+    pub fn empty(&self) -> bool {
+        self.vertices.is_empty()
+    }
+
+    fn upload_data(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        if self.vertices.is_empty() {
+            return;
+        }
+        if (self.vbo.size() as usize) < self.vertices.len() * std::mem::size_of::<Vertex>() {
+            self.vbo.destroy();
+            let vbo = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: None,
+                contents: bytemuck::cast_slice(&self.vertices),
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            });
+            self.vbo = vbo;
+        } else {
+            queue.write_buffer(&self.vbo, 0, bytemuck::cast_slice(&self.vertices));
+        }
+
+        if (self.ibo.size() as usize) < self.indices.len() * std::mem::size_of::<u16>() {
+            self.ibo.destroy();
+            let ibo = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: None,
+                contents: bytemuck::cast_slice(&self.indices),
+                usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+            });
+            self.ibo = ibo;
+        } else {
+            queue.write_buffer(&self.ibo, 0, bytemuck::cast_slice(&self.indices));
+        }
+    }
 }
 
 pub struct MonoGlyphAtlas {
@@ -523,16 +664,6 @@ impl Renderer {
 
         let renderer = Self {
             window,
-            vbo: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: None,
-                contents: &[],
-                usage: wgpu::BufferUsages::VERTEX,
-            }),
-            ibo: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: None,
-                contents: &[],
-                usage: wgpu::BufferUsages::INDEX,
-            }),
             font_vbo: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: None,
                 contents: &[],
@@ -543,18 +674,15 @@ impl Renderer {
                 contents: &[],
                 usage: wgpu::BufferUsages::INDEX,
             }),
+            quad_renderer: QuadRenderer::new(&device, &cam, surface_fmt),
+
             device,
             queue,
             size,
             surface,
             surface_fmt,
 
-            quad_render_pipeline,
-
             camera: cam,
-
-            draw_indices: vec![],
-            draw_vertices: vec![],
 
             font_atlas: atlas,
             font_bind_group,
@@ -563,7 +691,6 @@ impl Renderer {
 
             font_render_pipeline,
             draw_font: false,
-            draw_quads: false,
         };
 
         renderer.configure_surface();
@@ -572,45 +699,10 @@ impl Renderer {
     }
 
     pub fn begin_frame(&mut self) {
-        self.draw_vertices.clear();
-        self.draw_indices.clear();
+        self.quad_renderer.clear();
         self.font_draw_vertices.clear();
         self.font_draw_indices.clear();
         self.draw_font = false;
-        self.draw_quads = false;
-    }
-
-    pub fn draw_quad(&mut self, x: f32, y: f32, w: f32, h: f32, color: [f32; 3]) {
-        self.draw_quads = true;
-        let start = self.draw_vertices.len() as u16;
-
-        self.draw_vertices.extend_from_slice(&[
-            Vertex {
-                pos: [x, y, 0.0],
-                color,
-            },
-            Vertex {
-                pos: [x + w, y, 0.0],
-                color,
-            },
-            Vertex {
-                pos: [x + w, y + h, 0.0],
-                color,
-            },
-            Vertex {
-                pos: [x, y + h, 0.0],
-                color,
-            },
-        ]);
-
-        self.draw_indices.extend_from_slice(&[
-            start,
-            start + 1,
-            start + 2,
-            start,
-            start + 2,
-            start + 3,
-        ]);
     }
 
     pub fn draw_font_quad(&mut self, x: f32, y: f32, color: [f32; 3], c: char) {
@@ -657,42 +749,14 @@ impl Renderer {
     }
 
     pub fn end_frame(&mut self) {
-        if self.draw_vertices.is_empty() {
+        if self.quad_renderer.empty() {
             return;
         }
         if self.font_draw_vertices.is_empty() {
             return;
         }
 
-        if (self.vbo.size() as usize) < self.draw_vertices.len() * std::mem::size_of::<Vertex>() {
-            self.vbo.destroy();
-            let vbo = self
-                .device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: None,
-                    contents: bytemuck::cast_slice(&self.draw_vertices),
-                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                });
-            self.vbo = vbo;
-        } else {
-            self.queue
-                .write_buffer(&self.vbo, 0, bytemuck::cast_slice(&self.draw_vertices));
-        }
-
-        if (self.ibo.size() as usize) < self.draw_indices.len() * std::mem::size_of::<u16>() {
-            self.ibo.destroy();
-            let ibo = self
-                .device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: None,
-                    contents: bytemuck::cast_slice(&self.draw_indices),
-                    usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
-                });
-            self.ibo = ibo;
-        } else {
-            self.queue
-                .write_buffer(&self.ibo, 0, bytemuck::cast_slice(&self.draw_indices));
-        }
+        self.quad_renderer.upload_data(&self.device, &self.queue);
 
         if (self.font_vbo.size() as usize)
             < self.font_draw_vertices.len() * std::mem::size_of::<FontVertex>()
@@ -762,13 +826,8 @@ impl Renderer {
             occlusion_query_set: None,
         });
 
-        if self.draw_quads {
-            renderpass.set_pipeline(&self.quad_render_pipeline);
-            renderpass.set_bind_group(0, &self.camera.bind_group, &[]);
-            renderpass.set_vertex_buffer(0, self.vbo.slice(..));
-            renderpass.set_index_buffer(self.ibo.slice(..), wgpu::IndexFormat::Uint16);
-            renderpass.draw_indexed(0..self.draw_indices.len() as u32, 0, 0..1);
-        }
+        self.quad_renderer
+            .flush(&mut renderpass, &self.device, &self.queue, &self.camera);
 
         if self.draw_font {
             renderpass.set_pipeline(&self.font_render_pipeline);

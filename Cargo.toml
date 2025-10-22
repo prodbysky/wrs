@@ -3,10 +3,16 @@ name = "wrs"
 version = "0.1.0"
 edition = "2024"
 
+[profile.release]
+strip = true
+lto = true
+
 [dependencies]
+ab_glyph = "0.2.32"
 bytemuck = { version = "1.24.0", features = [ "derive" ] }
 cgmath = "0.18.0"
 env_logger = "0.11.8"
+image = "0.25.8"
 pollster = "0.4.0"
 wgpu = "27.0.1"
 winit = "0.30.12"

@@ -3,7 +3,7 @@ mod quad;
 mod font;
 use ab_glyph::ScaleFont;
 use camera::Camera;
-use std::{process::exit, sync::Arc};
+use std::sync::Arc;
 
 use image::EncodableLayout;
 
@@ -260,7 +260,6 @@ pub fn create_monospace_atlas(
 
 impl Renderer {
     pub async fn new(window: Arc<winit::window::Window>) -> Self {
-        let last = std::time::Instant::now();
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions::default())
@@ -302,7 +301,6 @@ impl Renderer {
 
         renderer.configure_surface();
 
-        println!("{:?}", last.elapsed());
         renderer
     }
 

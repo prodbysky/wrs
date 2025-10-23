@@ -155,6 +155,11 @@ impl FontRenderer {
             start + 3,
         ]);
     }
+    pub fn push_str(&mut self, x: f32, y: f32, color: [f32; 3], s: &str, atlas: &MonoGlyphAtlas) {
+        for (i, c) in s.chars().enumerate() {
+            self.push(x + (i as f32 * atlas.h_adv), y, color, c, atlas);
+        }
+    }
     pub fn flush(
         &mut self,
         render_pass: &mut wgpu::RenderPass,

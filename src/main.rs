@@ -1,8 +1,9 @@
 mod camera;
 mod quad;
 mod font;
+use ab_glyph::ScaleFont;
 use camera::Camera;
-use std::sync::Arc;
+use std::{process::exit, sync::Arc};
 
 use image::EncodableLayout;
 
@@ -50,7 +51,9 @@ impl winit::application::ApplicationHandler for App {
         // renderer.draw_quad(100.0, 100.0, 100.0, 100.0, [1.0, 1.0, 1.0]);
         // renderer.draw_quad(200.0, 200.0, 100.0, 100.0, [1.0, 1.0, 1.0]);
         // renderer.draw_quad(300.0, 300.0, 100.0, 100.0, [1.0, 1.0, 1.0]);
-        renderer.font_renderer.push(50.0, 50.0, [1.0, 1.0, 1.0], 'A', &renderer.font_atlas);
+        // renderer.font_renderer.push(50.0, 50.0, [1.0, 1.0, 1.0], '.', &renderer.font_atlas);
+        // renderer.font_renderer.push(80.0, 50.0, [1.0, 1.0, 1.0], 'A', &renderer.font_atlas);
+        renderer.font_renderer.push_str(50.0, 50.0, [1.0, 1.0, 1.0], "int *** main()", &renderer.font_atlas);
         renderer.end_frame();
 
         match event {
@@ -96,6 +99,7 @@ pub struct MonoGlyphAtlas {
     pub bind_group_layout: wgpu::BindGroupLayout,
     pub glyph_map: std::collections::HashMap<char, (f32, f32, f32, f32)>,
     pub cell_size: (u32, u32),
+    pub h_adv: f32,
 }
 
 pub fn create_monospace_atlas(
@@ -108,12 +112,12 @@ pub fn create_monospace_atlas(
     let font = ab_glyph::FontRef::try_from_slice(font_data).unwrap();
     let scale = ab_glyph::PxScale::from(scale);
 
-    let chars: Vec<char> = (0x20u8..0x7Fu8).map(|c| c as char).collect();
+    let chars: Vec<char> = (' '..='~').map(|c| c as char).collect();
 
-    let test_glyph = font
-        .outline_glyph(font.glyph_id('M').with_scale(scale))
-        .unwrap();
-    let bb = test_glyph.px_bounds();
+
+    let bb = chars.iter().map(|c| font.glyph_bounds(&font.glyph_id(*c).with_scale(scale))).max_by(|a, b| {
+        a.partial_cmp(b).unwrap()
+    }).unwrap();
     let cell_w = bb.width().ceil() as u32;
     let cell_h = bb.height().ceil() as u32;
 
@@ -132,7 +136,7 @@ pub fn create_monospace_atlas(
             let glyph_bb = og.px_bounds();
 
             let x_off = ((cell_w as f32 - glyph_bb.width()) / 2.0).floor() as i32;
-            let y_off = ((cell_h as f32 - glyph_bb.height()) / 2.0).floor() as i32;
+            let y_off = ((cell_h as f32 - glyph_bb.height())).floor() as i32;
 
             og.draw(|x, y, v| {
                 let px = (x as i32 + x_off).max(0) as u32;
@@ -152,6 +156,9 @@ pub fn create_monospace_atlas(
             let u1 = (x + cell_w) as f32 / atlas_width as f32;
             let v1 = (y + cell_h) as f32 / atlas_height as f32;
             glyph_map.insert(ch, (u0, v0, u1, v1));
+        } else {
+            glyph_map.insert(ch, (0.0, 0.0, 0.0, 0.0));
+
         }
     }
 
@@ -237,6 +244,8 @@ pub fn create_monospace_atlas(
         label: None,
     });
 
+    
+
     MonoGlyphAtlas {
         texture,
         view,
@@ -244,12 +253,14 @@ pub fn create_monospace_atlas(
         glyph_map,
         cell_size: (cell_w, cell_h),
         bind_group,
-        bind_group_layout
+        bind_group_layout,
+        h_adv: font.as_scaled(scale).h_advance(font.glyph_id('M'))
     }
 }
 
 impl Renderer {
     pub async fn new(window: Arc<winit::window::Window>) -> Self {
+        let last = std::time::Instant::now();
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions::default())
@@ -291,6 +302,7 @@ impl Renderer {
 
         renderer.configure_surface();
 
+        println!("{:?}", last.elapsed());
         renderer
     }
 
@@ -367,7 +379,7 @@ impl Renderer {
             width: self.size.width,
             height: self.size.height,
             desired_maximum_frame_latency: 2,
-            present_mode: wgpu::PresentMode::AutoVsync,
+            present_mode: wgpu::PresentMode::Immediate,
         };
         self.surface.configure(&self.device, &surface_cfg);
     }
